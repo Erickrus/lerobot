@@ -21,16 +21,105 @@
 对动作序列进行轻微降噪处理。
 完成所有步骤后，您将得到一个干净、流畅的动作块。
 这与直接产生单一行动的传统政策完全不同。
-<img src="Overall Architecture.png" />
+```mermaid
+flowchart TD
+    subgraph "Diffusion Process (Outer Loop)"
+        direction TB
+        Start["Start with Pure Noise\n𝐀^K ~ N(0,1)\nshape (B, Tp, Da)"] 
+        
+        DenoisingStep["Denoising Step\nk from K → 0"]
+        NetworkCall["Call Network ε_θ\n(O_t, noisy 𝐀^k, k)"]
+        
+        Update["Update:\n𝐀^{k-1} = α(𝐀^k - γ * ε_θ + noise)"]
+        
+        Check{ k > 0 ? }
+        
+        Final["Final Clean Action Sequence\n𝐀^0\n(B, Tp, Da)"]
+    end
 
-<img src="Sequence Diagram.png" />
+    subgraph "Neural Network ε_θ (Called Many Times)"
+        direction TB
+        Obs["Observations O_t\n+ Visual Encoder"]
+        Noisy["Noisy Action\n(B, Tp, Da)"]
+        Time["k"]
+        
+        CNNorTrans{CNN 1D U-Net\nor\nTransformer}
+        
+        Obs & Noisy & Time --> CNNorTrans
+        CNNorTrans --> PredictedNoise["Predicted Noise"]
+    end
+
+    Start --> DenoisingStep
+    DenoisingStep --> NetworkCall
+    NetworkCall --> Update
+    Update --> Check
+    Check -->|Yes| DenoisingStep
+    Check -->|No| Final
+
+    Obs -.->|Conditioning| NetworkCall
+```
+
+```mermaid
+sequenceDiagram
+    participant Robot
+    participant Policy
+    participant Network as ε_θ Network
+
+    Robot ->> Policy: Get latest observations O_t
+    Policy ->> Policy: Sample pure noise 𝐀^K
+    loop Denoising (e.g. 10~100 steps)
+        Policy ->> Network: noisy_action, O_t, k
+        Network -->> Policy: predicted_noise
+        Policy ->> Policy: Update action (denoise one step)
+    end
+    Policy ->> Robot: Execute first Ta actions
+```
 
 [s2]：这两种网络架构有什么区别？
 
 [s1]：架构 1 – 基于 CNN 的（1D U-Net）使用 1D 时间 U-Net 骨干网络。
 在每个块中，通过 FiLM（特征线性调制）注入观测值和时间步长。
 FiLM 通过预测每个通道的尺度 (γ) 和偏置 (β) 来调节特征。它对卷积神经网络高效有效。
-<img src="CNN Architecture.png" />
+```mermaid
+flowchart TD
+    subgraph "Visual Encoder (ResNet-18)"
+        Img["Raw Images\n(B, To, H, W, 3)"]
+        Img --> ConvStem["Conv + BN + ReLU Stem"]
+        ConvStem --> ResBlock1["ResNet Block 1\n+ GroupNorm"]
+        ResBlock1 --> ResBlock2["ResNet Block 2"]
+        ResBlock2 --> ResBlock3["ResNet Block 3"]
+        ResBlock3 --> ResBlock4["ResNet Block 4"]
+        ResBlock4 --> SpatialSoftmax["Spatial Softmax Pooling\n(keeps spatial info)"]
+        SpatialSoftmax --> ObsFeat["Observation Features\n(B, To, feature_dim)"]
+    end
+
+    ObsFeat --> ObsEmb["Observation Embedding\n+ Projection"]
+
+    subgraph Input
+        NoisyAct["Noisy Action\n(B, Tp, Da)"]
+        Timestep["Diffusion Timestep k\n→ Sinusoidal Emb"]
+    end
+
+    subgraph "Conditional 1D U-Net"
+        direction TB
+        Down1["Down Block 1\n1D Conv + FiLM"]
+        Down2["Down Block 2\n1D Conv + FiLM"]
+        Down3["Down Block 3\n1D Conv + FiLM"]
+        Bottleneck["Bottleneck\n1D Conv + FiLM"]
+        Up3["Up Block 3\n1D Conv + FiLM + Skip"]
+        Up2["Up Block 2\n1D Conv + FiLM + Skip"]
+        Up1["Up Block 1\n1D Conv + FiLM + Skip"]
+    end
+
+    ObsEmb -->|FiLM Conditioning| Down1 & Down2 & Down3 & Bottleneck & Up3 & Up2 & Up1
+    Timestep -->|FiLM Conditioning| Down1 & Down2 & Down3 & Bottleneck & Up3 & Up2 & Up1
+
+    NoisyAct --> ConvIn["Initial 1D Conv"] --> Down1
+    Down1 --> Down2 --> Down3 --> Bottleneck --> Up3 --> Up2 --> Up1
+
+    Up1 --> FinalConv["Final 1D Conv Layer"]
+    FinalConv --> NoisePred["Predicted Noise ε_θ\n(B, Tp, Da)"]
+```
 
 <img src="FiLM.png" />
 
@@ -39,7 +128,42 @@ FiLM 通过预测每个通道的尺度 (γ) 和偏置 (β) 来调节特征。它
 观测数据经过 MLP 处理，并使用交叉注意力机制。
 更擅长捕捉急剧、高频的动作变化，但对超参数更敏感。
 两者都接受相同的输入（噪声动作序列+观察条件），并输出预测噪声。
-<img src="Transformer Architecture.png" />
+```mermaid
+flowchart TD
+    subgraph "Visual Encoder (ResNet-18)"
+        Img2["Raw Images\n(B, To, H, W, 3)"]
+        Img2 --> ConvStem2["Conv + BN + ReLU Stem"]
+        ConvStem2 --> ResBlockA["ResNet Block 1-4\n+ GroupNorm"]
+        ResBlockA --> SpatialSoftmax2["Spatial Softmax Pooling"]
+        SpatialSoftmax2 --> ObsFeat2["Observation Features\n(B, To, feature_dim)"]
+    end
+
+    ObsFeat2 --> ObsMLP["Shared MLP → Observation Tokens\n(B, To, D)"]
+
+    subgraph Input
+        NoisyAct2["Noisy Action Sequence\n(B, Tp, Da)"]
+        k2["Diffusion Timestep k"]
+    end
+
+    NoisyAct2 --> ActionTok["Action Tokens\n(B, Tp, D)"]
+    k2 --> TimeTok["Time Embedding Token"]
+
+    TimeTok -->|Prepend| ActionTok
+
+    subgraph "Transformer Decoder Stack"
+        direction TB
+        TBlock1["Decoder Block 1\nSelf-Attention + Cross-Attention"]
+        TBlock2["Decoder Block 2\nSelf-Attention + Cross-Attention"]
+        TBlockN["... N blocks ..."]
+    end
+
+    ObsMLP -->|Cross Attention Keys/Values| TBlock1 & TBlock2 & TBlockN
+    ActionTok --> TBlock1 --> TBlock2 --> TBlockN
+
+    TBlockN --> OutTok["Output Tokens\n(B, Tp, D)"]
+    OutTok --> LinearHead["Linear Projection Head"]
+    LinearHead --> NoisePred2["Predicted Noise ε_θ\n(B, Tp, Da)"]
+```
 
 [s2]：作者对未来的工作有什么建议吗？
 
