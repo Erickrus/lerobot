@@ -16,6 +16,38 @@ ACT 借鉴了以下概念：
 ### 网络架构
 ACT 训练为**条件变分自编码器（CVAE）**，包含编码器（仅在训练时使用，推理时丢弃）和解码器（即策略网络）。
 
+```mermaid
+flowchart TD
+    subgraph Observations
+        O1["4x RGB Images\n480x640"] --> ResNet["ResNet18 x4 + PosEmb\n→ ~1200 tokens"]
+        O2["14D Joints"] --> ProjJ["Linear Proj → 512"]
+    end
+
+    subgraph CVAE_Encoder["CVAE Encoder (BERT-like Transformer) - Training Only"]
+        A["Action Chunk k x 14"] --> ConcatE
+        O2 --> ConcatE
+        CLS["["CLS"] Token"] --> ConcatE
+        ConcatE --> EncTrans["Transformer Encoder"]
+        EncTrans --> CLSFeat["CLS Feature"]
+        CLSFeat --> z_mu_var["μ, σ of z ~ N(μ,σ)"]
+    end
+
+    subgraph Policy_Decoder["Policy / CVAE Decoder (Transformer)"]
+        z["z ~ N(0,I) at inference"] --> ProjZ["Linear Proj → 512"]
+        ResNet --> ObsTokens["Observation Tokens"]
+        ProjJ --> ObsTokens
+        ProjZ --> ObsTokens
+        ObsTokens --> EncFuse["Transformer Encoder\n(fuses images + joints + z)"]
+        
+        Query["Learned Query Tokens\nk positions + PosEmb"] --> DecTrans["Transformer Decoder\nCross-Attention to EncFuse"]
+        DecTrans --> MLP["MLP Head"]
+        MLP --> Actions["k x 14 Target Joints"]
+    end
+
+    style CVAE_Encoder fill:#e1f5fe
+    style Policy_Decoder fill:#f3e5f5
+```
+
 - **观测数据（每个时间步）**：4 幅 RGB 图像（分辨率 480x640，来自前视、顶视及两个腕部摄像头）+ 14 维关节位置（每臂 7 维，对应从动机器人/follower robots）。
 - **动作数据**：14 维绝对目标关节位置（记录自遥操作期间的主动臂/leader joints，因为这些位置隐式编码了通过从动臂 PID 控制产生的力信息）。
 - **图像处理**：每个摄像头对应一个 ResNet18 → 特征图 → 展平（flatten）+ 二维正弦位置编码 → 约 1200 个维度为 512 的 token。随后拼接投影后的关节位置和风格变量 $z$。 - **CVAE 编码器**（类 BERT 的 Transformer 编码器）：输入包括当前关节状态、完整的动作片段（长度为 k）以及 [CLS] 标记。[CLS] 标记的输出用于预测潜在风格变量 z（服从对角高斯分布）的均值和方差。为提高速度，此处省略了图像输入（仅使用本体感知数据和动作数据）。
