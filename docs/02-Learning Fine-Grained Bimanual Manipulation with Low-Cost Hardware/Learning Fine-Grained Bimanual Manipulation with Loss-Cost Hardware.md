@@ -26,7 +26,7 @@ flowchart TD
     subgraph CVAE_Encoder["CVAE Encoder (BERT-like Transformer) - Training Only"]
         A["Action Chunk k x 14"] --> ConcatE
         O2 --> ConcatE
-        CLS["["CLS"] Token"] --> ConcatE
+        CLS["[CLS] Token"] --> ConcatE
         ConcatE --> EncTrans["Transformer Encoder"]
         EncTrans --> CLSFeat["CLS Feature"]
         CLSFeat --> z_mu_var["μ, σ of z ~ N(μ,σ)"]
