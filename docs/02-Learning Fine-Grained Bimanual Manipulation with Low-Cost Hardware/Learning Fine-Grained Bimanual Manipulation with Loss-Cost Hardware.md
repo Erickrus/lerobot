@@ -18,35 +18,40 @@
 
 ```mermaid
 flowchart TD
-    subgraph Observations
-        O1["4x RGB Images\n480x640"] --> ResNet["ResNet18 x4 + PosEmb\n→ ~1200 tokens"]
-        O2["14D Joints"] --> ProjJ["Linear Proj → 512"]
+    subgraph Input
+        Obs["Observations\n(4 Images + Joints)"]
+        Action["Action Chunk\nk x 14"]
     end
 
-    subgraph CVAE_Encoder["CVAE Encoder (BERT-like Transformer) - Training Only"]
-        A["Action Chunk k x 14"] --> ConcatE
-        O2 --> ConcatE
-        CLS["[CLS] Token"] --> ConcatE
+    subgraph CVAE_Encoder["CVAE Encoder (Training Only)"]
+        Action & Joints["Current Joints"] --> ConcatE["Concat + [CLS] Token"]
         ConcatE --> EncTrans["Transformer Encoder"]
         EncTrans --> CLSFeat["CLS Feature"]
-        CLSFeat --> z_mu_var["μ, σ of z ~ N(μ,σ)"]
+        CLSFeat --> Params["μ, σ"]
+        Params --> Samplez["Sample z\n(reparameterization trick)"]
     end
 
-    subgraph Policy_Decoder["Policy / CVAE Decoder (Transformer)"]
-        z["z ~ N(0,I) at inference"] --> ProjZ["Linear Proj → 512"]
-        ResNet --> ObsTokens["Observation Tokens"]
-        ProjJ --> ObsTokens
-        ProjZ --> ObsTokens
-        ObsTokens --> EncFuse["Transformer Encoder\n(fuses images + joints + z)"]
-        
-        Query["Learned Query Tokens\nk positions + PosEmb"] --> DecTrans["Transformer Decoder\nCross-Attention to EncFuse"]
-        DecTrans --> MLP["MLP Head"]
-        MLP --> Actions["k x 14 Target Joints"]
+    subgraph Policy_Decoder["Policy / CVAE Decoder"]
+        Samplez --> z["z (sampled)"]
+        Obs --> DecoderInput["ResNet Images + Joints + z"]
+        z --> DecoderInput
+        DecoderInput --> DecoderTrans["Transformer\n(Encoder + Decoder)"]
+        DecoderTrans --> Pred["Predicted Action Chunk\nˆa"]
     end
+
+    subgraph Losses
+        Pred & Action --> Recon["Reconstruction Loss\n(L1)"]
+        Params --> KL["KL Loss\nD_KL(q(z) || N(0,I))"]
+        Recon & KL --> Total["Total Loss = L_reconst + β × L_KL"]
+    end
+
+    Total --> Update["Backpropagation\nUpdate Encoder + Decoder"]
 
     style CVAE_Encoder fill:#e1f5fe
     style Policy_Decoder fill:#f3e5f5
+    style Losses fill:#fff3e0
 ```
+
 
 [s2]: 这个架构里，CVAE 到底在做什么？能从零开始详细解释一下吗？另外 AE、VAE、CVAE 到底有什么区别？
 
