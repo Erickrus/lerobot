@@ -1,0 +1,465 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Flow Matching — Isometric 3D Vertical Planes</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body {
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+    background: #0a0a16;
+    color: #e0e0e0;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    min-height: 100vh;
+    padding: 15px;
+}
+h1 { font-size: 1.3rem; margin-bottom: 3px; color: #fff; }
+.subtitle { font-size: 0.78rem; color: #777; margin-bottom: 10px; text-align: center; max-width: 750px; }
+.container {
+    background: #121a2e;
+    border-radius: 12px;
+    padding: 16px;
+    max-width: 1200px;
+    width: 100%;
+    box-shadow: 0 4px 30px rgba(0,0,0,0.6);
+}
+.controls {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 10px;
+    align-items: center;
+    margin-bottom: 10px;
+}
+.control-group { display: flex; align-items: center; gap: 5px; }
+label { font-size: 0.72rem; color: #aaa; white-space: nowrap; }
+input[type="range"] { width: 100px; cursor: pointer; }
+button {
+    padding: 5px 12px; border: none; border-radius: 6px;
+    cursor: pointer; font-size: 0.72rem; font-weight: 600;
+    transition: all 0.15s;
+}
+.btn-train { background: #4361ee; color: white; min-width: 75px; }
+.btn-train:hover { background: #3a56d4; }
+.btn-accent { background: #06d6a0; color: #1a1a2e; }
+.btn-accent:hover { background: #05b88a; }
+.btn-secondary { background: #2d3748; color: #e0e0e0; }
+.btn-secondary:hover { background: #3d4a5c; }
+.status {
+    font-size: 0.72rem; padding: 3px 8px;
+    border-radius: 4px; background: #1e2a42; color: #06d6a0;
+}
+canvas {
+    display: block; width: 100%;
+    border-radius: 8px; background: #060610;
+    border: 1px solid #1e2a42;
+}
+.legend {
+    display: flex; gap: 12px; margin-top: 8px;
+    font-size: 0.68rem; flex-wrap: wrap; color: #888;
+}
+.legend-item { display: flex; align-items: center; gap: 4px; }
+.legend-dot { width: 8px; height: 8px; border-radius: 50%; }
+.explanation {
+    margin-top: 10px; padding: 10px; background: #080812;
+    border-radius: 8px; font-size: 0.72rem; line-height: 1.5; color: #888;
+}
+.explanation strong { color: #ccc; }
+</style>
+</head>
+<body>
+
+<h1>Flow Matching — Vertical Planes, Pseudo-3D Isometric</h1>
+<p class="subtitle">Vertical planes arranged left-to-right (t=1.0 noise → t=0.0 clean). All share the same bottom line. Planes recede in isometric depth. Final converged positions are circle dots.</p>
+
+<div class="container">
+    <div class="controls">
+        <div class="control-group">
+            <label>Training:</label>
+            <input type="range" id="epochSlider" min="0" max="100" value="0">
+            <span id="epochLabel" class="status">0%</span>
+        </div>
+        <button class="btn-train" id="trainBtn">&#9654; Train</button>
+        <button class="btn-accent" id="sampleBtn">Sample</button>
+        <button class="btn-secondary" id="resetBtn">Reset</button>
+        <div class="control-group">
+            <label>Particles:</label>
+            <input type="range" id="numSlider" min="4" max="100" value="10">
+        </div>
+        <div class="control-group">
+            <label>Depth:</label>
+            <input type="range" id="depthSlider" min="10" max="50" value="28">
+        </div>
+    </div>
+
+    <canvas id="canvas" width="1160" height="700"></canvas>
+
+    <div class="legend">
+        <div class="legend-item"><div class="legend-dot" style="background:#ff6b6b"></div> t=1.0 noise (left)</div>
+        <div class="legend-item"><div class="legend-dot" style="background:#ffd93d"></div> intermediate</div>
+        <div class="legend-item"><div class="legend-dot" style="background:#06d6a0"></div> t=0.0 converged circles (right)</div>
+        <div class="legend-item"><div class="legend-dot" style="background:rgba(100,150,255,0.5)"></div> velocity arrows</div>
+        <div class="legend-item"><div class="legend-dot" style="background:rgba(255,200,80,0.5)"></div> particle paths</div>
+    </div>
+
+    <div class="explanation">
+        <strong>Pseudo-3D:</strong> Each vertical plane is one timestep's 2D action space, viewed at an isometric angle. They share the same screen-bottom y.<br>
+        <strong>Train:</strong> Click to auto-train (click again to pause). The velocity field evolves from random arrows to pointing at target clusters.<br>
+        <strong>Sample:</strong> Random noise particles on left plane cascade through each plane. At the rightmost plane (t=0), they converge as circle dots at target locations.
+    </div>
+</div>
+
+<script>
+const canvas = document.getElementById('canvas');
+const ctx = canvas.getContext('2d');
+const CW = canvas.width;
+const CH = canvas.height;
+
+const NUM_STEPS = 10;
+const FIELD = 100;
+
+// Target action modes (where particles should converge)
+const targets = [
+    { x: 25, y: 30 },
+    { x: 78, y: 25 },
+    { x: 50, y: 75 },
+];
+
+// Seeded RNG
+let seed = 42;
+function srand(s) { seed = s; }
+function rand() {
+    seed = (seed * 1664525 + 1013904223) & 0xffffffff;
+    return (seed >>> 0) / 0xffffffff;
+}
+
+// Random field vectors (untrained)
+srand(77);
+const GRID_STEP = 10;
+const gridN = Math.ceil(FIELD / GRID_STEP);
+const randomVecs = [];
+for (let i = 0; i < gridN * gridN; i++) {
+    const a = rand() * Math.PI * 2;
+    randomVecs.push({ vx: Math.cos(a) * 0.55, vy: Math.sin(a) * 0.55 });
+}
+
+// State
+let epoch = 0;
+let training = false;
+let trainInterval = null;
+let particles = [];
+let initialPositions = [];
+let animStep = 0;
+let animating = false;
+
+// --- Velocity field ---
+function trueVel(x, y) {
+    let vx = 0, vy = 0, tw = 0;
+    for (const t of targets) {
+        const dx = t.x - x, dy = t.y - y;
+        const d = Math.sqrt(dx * dx + dy * dy) + 0.5;
+        const w = 1 / (d * d);
+        tw += w;
+        const s = Math.min(d / 30, 1.3);
+        vx += w * (dx / d) * s;
+        vy += w * (dy / d) * s;
+    }
+    return { vx: vx / tw, vy: vy / tw };
+}
+
+function fieldVel(x, y, progress) {
+    const col = Math.min(Math.floor(x / GRID_STEP), gridN - 1);
+    const row = Math.min(Math.floor(y / GRID_STEP), gridN - 1);
+    const idx = Math.abs(row * gridN + col) % randomVecs.length;
+    const rv = randomVecs[idx];
+    const tv = trueVel(x, y);
+    return {
+        vx: (1 - progress) * rv.vx + progress * tv.vx,
+        vy: (1 - progress) * rv.vy + progress * tv.vy,
+    };
+}
+
+// --- Isometric projection for vertical planes ---
+// Planes are vertical rectangles, arranged left-to-right.
+// All share the same bottom screen-y.
+// Each plane has a slight isometric skew (top tilts back) to show depth.
+// u = horizontal position on plane [0..FIELD]
+// v = vertical position on plane [0..FIELD] (0=bottom, FIELD=top)
+function project(u, v, layer) {
+    const depth = parseInt(document.getElementById('depthSlider').value);
+
+    // Horizontal position: evenly spaced left-to-right
+    const totalWidth = CW - 120;
+    const planeSpacing = totalWidth / (NUM_STEPS + 1);
+    const centerX = 60 + (layer + 0.5) * planeSpacing;
+
+    // Vertical: bottom-aligned. v=0 at bottom, v=FIELD at top.
+    const bottomY = CH - 60;
+    const planeHeight = 420;
+
+    // Isometric depth cue: the plane tilts slightly.
+    // u shifts horizontally (plane has some "width" in perspective).
+    // Also each layer has a small y-offset going up (depth recession).
+    const depthShiftY = -layer * depth * 0.08;
+    const planeWidth = 45;
+
+    // u maps across the narrow width + skew
+    const skew = 0.2;
+    const sx = centerX + ((u / FIELD) - 0.5) * planeWidth;
+    const sy = bottomY - (v / FIELD) * planeHeight + depthShiftY + ((u / FIELD) - 0.5) * planeHeight * skew;
+
+    return { sx, sy };
+}
+
+// --- Compute particle trajectories ---
+function computeTrajectories() {
+    const progress = epoch / 100;
+    particles = [];
+    for (const init of initialPositions) {
+        const positions = [{ x: init.x, y: init.y }];
+        let px = init.x, py = init.y;
+        for (let step = 0; step < NUM_STEPS; step++) {
+            const v = fieldVel(px, py, progress);
+            px += v.vx * 7;
+            py += v.vy * 7;
+            px = Math.max(2, Math.min(FIELD - 2, px));
+            py = Math.max(2, Math.min(FIELD - 2, py));
+            positions.push({ x: px, y: py });
+        }
+        particles.push(positions);
+    }
+}
+
+// --- Colors ---
+function stepColor(step, alpha) {
+    const t = step / NUM_STEPS;
+    const r = Math.round(255 * (1 - t) + 6 * t);
+    const g = Math.round(107 * (1 - t) + 214 * t);
+    const b = Math.round(107 * (1 - t) + 160 * t);
+    return `rgba(${r},${g},${b},${alpha || 1})`;
+}
+
+// --- Draw a single vertical plane ---
+function drawPlane(layer) {
+    const bl = project(0, 0, layer);
+    const br = project(FIELD, 0, layer);
+    const tr = project(FIELD, FIELD, layer);
+    const tl = project(0, FIELD, layer);
+
+    ctx.fillStyle = `rgba(10, 15, 30, 0.55)`;
+    ctx.strokeStyle = stepColor(layer, 0.3);
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.moveTo(bl.sx, bl.sy);
+    ctx.lineTo(br.sx, br.sy);
+    ctx.lineTo(tr.sx, tr.sy);
+    ctx.lineTo(tl.sx, tl.sy);
+    ctx.closePath();
+    ctx.fill();
+    ctx.stroke();
+
+    // Timestep label below
+    const mid = project(FIELD / 2, -5, layer);
+    ctx.fillStyle = stepColor(layer, 0.7);
+    ctx.font = '9px monospace';
+    ctx.textAlign = 'center';
+    ctx.fillText(`t=${(1 - layer / NUM_STEPS).toFixed(1)}`, mid.sx, mid.sy + 18);
+}
+
+// --- Draw velocity arrows on a plane ---
+function drawArrows(layer) {
+    const progress = epoch / 100;
+    const spacing = 16;
+    const n = Math.floor(FIELD / spacing);
+
+    for (let gy = 1; gy < n; gy++) {
+        for (let gx = 1; gx < n; gx++) {
+            const fx = gx * spacing;
+            const fy = gy * spacing;
+            const v = fieldVel(fx, fy, progress);
+            const mag = Math.sqrt(v.vx * v.vx + v.vy * v.vy);
+            if (mag < 0.03) continue;
+
+            const from = project(fx, fy, layer);
+            const len = Math.min(mag * 8, 6);
+            const nx = v.vx / mag, ny = v.vy / mag;
+            const to = project(fx + nx * len, fy + ny * len, layer);
+
+            ctx.strokeStyle = `rgba(80, 140, 255, ${0.15 + mag * 0.2})`;
+            ctx.lineWidth = 0.7;
+            ctx.beginPath();
+            ctx.moveTo(from.sx, from.sy);
+            ctx.lineTo(to.sx, to.sy);
+            ctx.stroke();
+        }
+    }
+}
+
+// --- Draw targets on a plane ---
+function drawTargets(layer) {
+    const alpha = 0.15 + (layer / NUM_STEPS) * 0.35;
+    const numDots = 16; // dots arranged in a circle
+    const radius = 10;  // circle radius in field coords
+
+    for (const t of targets) {
+        for (let i = 0; i < numDots; i++) {
+            const angle = (i / numDots) * Math.PI * 2;
+            const dx = Math.cos(angle) * radius;
+            const dy = Math.sin(angle) * radius;
+            const p = project(t.x + dx, t.y + dy, layer);
+
+            ctx.fillStyle = `rgba(6, 214, 160, ${alpha})`;
+            ctx.beginPath();
+            ctx.arc(p.sx, p.sy, 1.8, 0, Math.PI * 2);
+            ctx.fill();
+        }
+    }
+}
+
+// --- Draw particles ---
+function drawParticles(maxStep) {
+    if (particles.length === 0) return;
+
+    for (const traj of particles) {
+        const vis = Math.min(maxStep + 1, traj.length);
+
+        // Paths between planes
+        for (let s = 0; s < vis - 1; s++) {
+            const from = project(traj[s].x, traj[s].y, s);
+            const to = project(traj[s + 1].x, traj[s + 1].y, s + 1);
+            ctx.strokeStyle = `rgba(255, 210, 80, ${0.12 + (s / NUM_STEPS) * 0.18})`;
+            ctx.lineWidth = 1.2;
+            ctx.setLineDash([2, 3]);
+            ctx.beginPath();
+            ctx.moveTo(from.sx, from.sy);
+            ctx.lineTo(to.sx, to.sy);
+            ctx.stroke();
+            ctx.setLineDash([]);
+        }
+
+        // Dots on each plane
+        for (let s = 0; s < vis; s++) {
+            const p = project(traj[s].x, traj[s].y, s);
+
+            if (s === NUM_STEPS) {
+                // FINAL: draw as a filled circle dot on the target ring
+                ctx.shadowColor = '#06d6a0';
+                ctx.shadowBlur = 10;
+                ctx.fillStyle = '#06d6a0';
+                ctx.beginPath();
+                ctx.arc(p.sx, p.sy, 5, 0, Math.PI * 2);
+                ctx.fill();
+                ctx.shadowBlur = 0;
+                ctx.strokeStyle = 'rgba(255,255,255,0.7)';
+                ctx.lineWidth = 1.5;
+                ctx.beginPath();
+                ctx.arc(p.sx, p.sy, 5, 0, Math.PI * 2);
+                ctx.stroke();
+            } else {
+                const color = stepColor(s, 1);
+                const r = (s === vis - 1) ? 4 : 2.5;
+                ctx.fillStyle = color;
+                ctx.shadowColor = color;
+                ctx.shadowBlur = (s === vis - 1) ? 5 : 0;
+                ctx.beginPath();
+                ctx.arc(p.sx, p.sy, r, 0, Math.PI * 2);
+                ctx.fill();
+                ctx.shadowBlur = 0;
+            }
+        }
+    }
+}
+
+// --- Main render ---
+function render() {
+    ctx.clearRect(0, 0, CW, CH);
+    const maxVis = animating ? animStep : NUM_STEPS;
+
+    // Draw planes back-to-front (rightmost first for overlap)
+    for (let layer = NUM_STEPS; layer >= 0; layer--) {
+        drawPlane(layer);
+        drawArrows(layer);
+        drawTargets(layer);
+    }
+    drawParticles(maxVis);
+}
+
+// --- Animation ---
+function animateStep() {
+    if (!animating) return;
+    animStep++;
+    render();
+    if (animStep >= NUM_STEPS) { animating = false; return; }
+    setTimeout(animateStep, 320);
+}
+
+// --- Training with pause/resume ---
+function startTraining() {
+    training = true;
+    document.getElementById('trainBtn').textContent = '⏸ Pause';
+    trainInterval = setInterval(() => {
+        if (epoch >= 100) { stopTraining(); return; }
+        epoch++;
+        document.getElementById('epochSlider').value = epoch;
+        document.getElementById('epochLabel').textContent = epoch + '%';
+        if (initialPositions.length > 0) computeTrajectories();
+        render();
+    }, 90);
+}
+
+function stopTraining() {
+    training = false;
+    clearInterval(trainInterval);
+    document.getElementById('trainBtn').textContent = '▶ Train';
+}
+
+// --- Events ---
+document.getElementById('trainBtn').addEventListener('click', () => {
+    training ? stopTraining() : startTraining();
+});
+
+document.getElementById('epochSlider').addEventListener('input', (e) => {
+    epoch = parseInt(e.target.value);
+    document.getElementById('epochLabel').textContent = epoch + '%';
+    if (initialPositions.length > 0) computeTrajectories();
+    render();
+});
+
+document.getElementById('sampleBtn').addEventListener('click', () => {
+    const n = parseInt(document.getElementById('numSlider').value);
+    srand(Date.now() & 0xffff);
+    initialPositions = [];
+    for (let i = 0; i < n; i++) {
+        initialPositions.push({
+            x: 10 + rand() * (FIELD - 20),
+            y: 10 + rand() * (FIELD - 20),
+        });
+    }
+    computeTrajectories();
+    animStep = 0;
+    animating = true;
+    render();
+    setTimeout(animateStep, 400);
+});
+
+document.getElementById('resetBtn').addEventListener('click', () => {
+    stopTraining();
+    epoch = 0;
+    particles = [];
+    initialPositions = [];
+    animating = false;
+    animStep = 0;
+    document.getElementById('epochSlider').value = 0;
+    document.getElementById('epochLabel').textContent = '0%';
+    render();
+});
+
+document.getElementById('depthSlider').addEventListener('input', () => render());
+
+// --- Init ---
+render();
+</script>
+</body>
+</html>
